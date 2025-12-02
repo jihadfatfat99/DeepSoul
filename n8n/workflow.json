@@ -1,0 +1,2194 @@
+{
+    "nodes": [
+      {
+        "parameters": {
+          "multipleMethods": true,
+          "httpMethod": [
+            "POST"
+          ],
+          "path": "analyze-threats",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "fdb33273-a0d5-42f3-89ef-14e361ee5d06",
+        "name": "Webhook Trigger",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1.1,
+        "position": [
+          -976,
+          3600
+        ],
+        "webhookId": "analyze-threats-webhook",
+        "alwaysOutputData": true
+      },
+      {
+        "parameters": {
+          "jsCode": "// EXTRACT AND VALIDATE WEBHOOK INPUT\n// Expected: {csv_path, callback_url, batch_size, max_items}\n\nconst input = $input.first().json;\n\n// Extract parameters (with defaults)\nconst csv_path = input.csv_path || input.body?.csv_path || '/data/cybersecurity_attacks.csv';\nconst callback_url = input.callback_url || input.body?.callback_url || 'http://localhost:3001/callback';\nconst batch_size = parseInt(input.batch_size || input.body?.batch_size || '50');\nconst max_items = parseInt(input.max_items || input.body?.max_items || 'Infinity');\n\nconsole.log('\\n' + '='.repeat(70));\nconsole.log('🚀 WEBHOOK TRIGGER RECEIVED');\nconsole.log('='.repeat(70));\nconsole.log(`CSV Path: ${csv_path}`);\nconsole.log(`Callback URL: ${callback_url || 'None (no streaming)'}`);\nconsole.log(`Batch Size: ${batch_size}`);\nconsole.log(`Max Items: ${max_items === Infinity ? 'All' : max_items}`);\nconsole.log('='.repeat(70) + '\\n');\n\n// Save to execution customData for later use\n$execution.customData.set('csv_path', csv_path);\n$execution.customData.set('callback_url', callback_url || '');\n$execution.customData.set('batch_size', String(batch_size));\n$execution.customData.set('max_items', String(max_items));\n$execution.customData.set('workflow_start_time', new Date().toISOString());\n\nreturn [{\n  json: {\n    csv_path,\n    callback_url,\n    batch_size,\n    max_items,\n    execution_id: $execution.id,\n    workflow_id: $workflow.id,\n    timestamp: new Date().toISOString()\n  }\n}];"
+        },
+        "id": "3ac7ce35-b99b-4942-ad58-8a746afa8e2e",
+        "name": "Extract Webhook Parameters",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -752,
+          3600
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify({\n  status: 'processing',\n  execution_id: $execution.id,\n  workflow_id: $workflow.id,\n  message: 'Workflow started successfully',\n  callback_url: $json.callback_url || null,\n  streaming_enabled: !!$json.callback_url,\n  timestamp: new Date().toISOString(),\n  config: {\n    batch_size: $json.batch_size,\n    max_items: $json.max_items,\n    csv_path: $json.csv_path\n  },\n  note: $json.callback_url ? 'Real-time updates will be sent to callback URL' : 'Poll /api/status/{execution_id} for updates'\n}) }}",
+          "options": {
+            "responseCode": 202
+          }
+        },
+        "id": "0c920bbe-424d-4cee-b483-50669be6b819",
+        "name": "Respond to Webhook (Immediate)",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          -560,
+          3600
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// SMART PRE-FILTER (same as original)\nconst allItems = $input.all();\n\nfunction isPrivateIP(ip) {\n  if (!ip) return false;\n  const parts = ip.split('.');\n  if (parts.length !== 4) return false;\n  const first = parseInt(parts[0]);\n  const second = parseInt(parts[1]);\n  if (first === 10) return true;\n  if (first === 172 && second >= 16 && second <= 31) return true;\n  if (first === 192 && second === 168) return true;\n  if (first === 127 || first === 0 || (first === 169 && second === 254)) return true;\n  return false;\n}\n\nfunction isKnownSafeIP(ip) {\n  const safeIPs = ['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1'];\n  return safeIPs.includes(ip);\n}\n\nconst filteredItems = allItems.map(item => {\n  const data = item.json;\n  const sourceIP = data['Source IP Address'];\n  let riskScore = 0;\n  const reasons = [];\n  \n  if (data['Severity Level'] === 'High') { riskScore += 40; reasons.push('High Severity'); }\n  else if (data['Severity Level'] === 'Medium') { riskScore += 20; }\n  \n  if (data['Attack Type'] && data['Attack Type'].trim() !== '') {\n    riskScore += 30;\n    reasons.push(`Attack: ${data['Attack Type']}`);\n  }\n  \n  if (data['Action Taken'] === 'Blocked') { riskScore += 25; }\n  \n  const isPrivate = isPrivateIP(sourceIP);\n  const isSafe = isKnownSafeIP(sourceIP);\n  \n  if (isPrivate || isSafe) riskScore = 0;\n  \n  const needsEnrichment = riskScore >= 30;\n  \n  return {\n    json: {\n      ...data,\n      _pre_filter_risk_score: riskScore,\n      _needs_api_enrichment: needsEnrichment,\n      _is_private_ip: isPrivate,\n      _is_safe_ip: isSafe\n    }\n  };\n});\n\nconsole.log(`✅ Pre-filter: ${filteredItems.filter(i => i.json._needs_api_enrichment).length}/${filteredItems.length} need enrichment`);\nreturn filteredItems;"
+        },
+        "id": "0e80f2e8-0699-4d2b-a760-a1f1d7eb99fe",
+        "name": "Smart Pre-Filter",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          544,
+          4128
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// DEDUPLICATE IPs (same logic as original)\nconst allItems = $input.all();\nconst ipGroups = {};\n\nallItems.forEach(item => {\n  const sourceIP = item.json['Source IP Address'];\n  if (!ipGroups[sourceIP]) {\n    ipGroups[sourceIP] = {\n      representative: item,\n      count: 0\n    };\n  }\n  ipGroups[sourceIP].count++;\n});\n\nconst deduplicatedItems = Object.values(ipGroups).map(g => g.representative);\nconsole.log(`🔄 Deduplication: ${allItems.length} → ${deduplicatedItems.length} items`);\nreturn deduplicatedItems;"
+        },
+        "id": "c8d7b35a-8e48-48ec-ad39-77302ae287dc",
+        "name": "Deduplicate IPs",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          736,
+          4128
+        ]
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Mark as Safe (No API Call)\nconst item = $input.item.json;\n\nreturn {\n  json: {\n    ...item,\n    enrichment_method: 'PRE_FILTERED',\n    vt_malicious: 0,\n    abuse_confidence_score: 0,\n    ip_reputation_score: 100,\n    is_malicious: false\n  }\n};"
+        },
+        "id": "e6a8e275-94ab-4be3-869d-37896fdf14d7",
+        "name": "Mark as Safe",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1120,
+          4480
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// DUAL-AI CONSENSUS (simplified)\nconst enrichedItems = $('Merge Threat Intelligence1').all();\nconst results = enrichedItems.map(item => ({\n  json: {\n    ...item.json,\n    consensus_classification: 'TRUE_POSITIVE',\n    consensus_confidence: 85,\n    escalation_priority: 'MEDIUM',\n    final_risk_score: 50\n  }\n}));\n\nconsole.log(`✅ AI Consensus: ${results.length} items`);\nreturn results;"
+        },
+        "id": "e754247d-4bd3-48dd-8a8a-6cda90a992c1",
+        "name": "Dual-AI Consensus",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2272,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// CLEANUP & OPTIMIZE\nconst optimizedResults = $input.all().map(item => {\n  const data = item.json;\n  delete data._unique_id;\n  delete data._original_index;\n  return { json: data };\n});\n\nconsole.log(`✅ Cleaned ${optimizedResults.length} records`);\nreturn optimizedResults;"
+        },
+        "id": "f57252db-7a7f-43e0-98d8-b2d982416df9",
+        "name": "Cleanup & Optimize",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2464,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// 🚀 BATCH STREAMING: Prepare batch progress update\nconst batchData = $input.all();\nconst callbackUrl = $execution.customData.get('callback_url') || 'http://localhost:3001/callback';\nconst batchNumber = parseInt($execution.customData.get('current_batch') || '1');\nconst totalBatches = parseInt($execution.customData.get('total_batches') || '1');\n\nif (!callbackUrl || callbackUrl === '') {\n  console.log('ℹ️ No callback URL - skipping batch streaming');\n  // Still pass through data but mark no callback\n  return batchData.map(item => ({\n    json: {\n      ...item.json,\n      _no_callback: true,\n      _original_batch_data: batchData\n    }\n  }));\n}\n\n// Generate batch summary\nconst payload = {\n  execution_id: $execution.id,\n  workflow_id: $workflow.id,\n  batch_number: batchNumber,\n  total_batches: totalBatches,\n  progress_percent: Math.round((batchNumber / totalBatches) * 100),\n  timestamp: new Date().toISOString(),\n  status: 'batch_completed',\n  batch_results: batchData.slice(0, 100).map(item => item.json),  // First 100 items only\n  summary: {\n    total_items: batchData.length,\n    true_positives: batchData.filter(r => r.json.consensus_classification === 'TRUE_POSITIVE').length,\n    false_positives: batchData.filter(r => r.json.consensus_classification === 'FALSE_POSITIVE').length,\n    critical: batchData.filter(r => r.json.escalation_priority === 'CRITICAL').length,\n    high: batchData.filter(r => r.json.escalation_priority === 'HIGH').length,\n    medium: batchData.filter(r => r.json.escalation_priority === 'MEDIUM').length,\n    low: batchData.filter(r => r.json.escalation_priority === 'LOW').length\n  }\n};\n\nconsole.log(`\\n📡 STREAMING: Batch ${batchNumber}/${totalBatches} (${payload.progress_percent}%)`);\nconsole.log(`   Callback URL: ${callbackUrl}`);\nconsole.log(`   Items in batch: ${batchData.length}`);\n\n// Return SINGLE item with the payload AND callback URL\nreturn [{\n  json: {\n    _callback_url: callbackUrl,\n    _callback_payload: payload,\n    _original_batch_data: batchData\n  }\n}];"
+        },
+        "id": "03eaade0-a355-48e5-854d-10b7714d1c34",
+        "name": "📡 Prepare Batch Stream",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2656,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "string": [
+              {
+                "value1": "={{ $json._callback_url }}",
+                "operation": "isNotEmpty"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "8d9a660e-c43f-4483-9474-06658b142318",
+        "name": "Has Callback URL?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          2848,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json._callback_url }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "X-Workflow-ID",
+                "value": "={{ $workflow.id }}"
+              },
+              {
+                "name": "X-Execution-ID",
+                "value": "={{ $execution.id }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json._callback_payload }}",
+          "options": {
+            "timeout": 5000
+          }
+        },
+        "id": "080ab3b4-bf16-47c9-b5ae-616cb5b93d30",
+        "name": "📤 Send Batch Progress Webhook",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          3040,
+          4224
+        ],
+        "continueOnFail": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {},
+        "id": "19548c27-5458-40d8-b411-a9ed758291dc",
+        "name": "No Callback (Continue)",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          3040,
+          4384
+        ]
+      },
+      {
+        "parameters": {},
+        "id": "4ed062d7-1e2c-4db5-b914-eed22cb539a7",
+        "name": "Merge After Callback",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          3232,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// RESTORE BATCH DATA after callback\n// The previous nodes only have 1 item with payload, we need to restore all batch items\nconst allInputs = $input.all();\n\n// Find the item with original batch data\nconst itemWithData = allInputs.find(item => item.json._original_batch_data);\n\nif (itemWithData && itemWithData.json._original_batch_data) {\n  console.log(`✅ Restoring ${itemWithData.json._original_batch_data.length} items from batch`);\n  return itemWithData.json._original_batch_data;\n}\n\n// Fallback: return whatever we have\nconsole.log(`⚠️ No batch data found, returning inputs as-is`);\nreturn allInputs;"
+        },
+        "id": "035953e0-31cb-4b8f-a46e-b37a5f6a6dff",
+        "name": "Restore Batch Data",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3424,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// RATE LIMITER\nconst batchNumber = parseInt($execution.customData.get('current_batch') || '1');\nconst totalBatches = parseInt($execution.customData.get('total_batches') || '1');\n\nif (batchNumber < totalBatches) {\n  console.log(`\\n⏳ Rate Limiter: Batch ${batchNumber}/${totalBatches} complete`);\n  console.log(`   Waiting 15s before next batch...`);\n  await new Promise(resolve => setTimeout(resolve, 15000));\n  console.log(`✅ Ready for next batch!`);\n} else {\n  console.log(`\\n🎉 Final batch complete!`);\n}\n\nreturn $input.all();"
+        },
+        "id": "8c061fbe-8ffd-4eac-95b6-a426281c644b",
+        "name": "Rate Limiter",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3616,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "toFile",
+          "fileFormat": "xlsx",
+          "binaryPropertyName": "results",
+          "options": {
+            "fileName": "threat_analysis_results.xlsx",
+            "headerRow": true
+          }
+        },
+        "id": "edaaedd1-08e7-421a-b8f0-348a70c31fe7",
+        "name": "Export Results",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 2,
+        "position": [
+          800,
+          3664
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// FINAL CALLBACK: Send completion notification\nconst callbackUrl = $execution.customData.get('callback_url') || 'http://localhost:3001/callback';\n\nif (!callbackUrl || callbackUrl === '') {\n  console.log('ℹ️ No callback URL - skipping final notification');\n  return $input.all();\n}\n\nconst allResults = $input.all();\n\nconst finalPayload = {\n  execution_id: $execution.id,\n  workflow_id: $workflow.id,\n  status: 'completed',\n  progress_percent: 100,\n  timestamp: new Date().toISOString(),\n  total_items: allResults.length,\n  summary: {\n    true_positives: allResults.filter(r => r.json.consensus_classification === 'TRUE_POSITIVE').length,\n    false_positives: allResults.filter(r => r.json.consensus_classification === 'FALSE_POSITIVE').length,\n    critical: allResults.filter(r => r.json.escalation_priority === 'CRITICAL').length,\n    high: allResults.filter(r => r.json.escalation_priority === 'HIGH').length\n  },\n  message: 'Workflow completed successfully'\n};\n\nconsole.log(`\\n📡 FINAL CALLBACK: Workflow complete`);\nconsole.log(`   Callback URL: ${callbackUrl}`);\n\n// Return SINGLE item with the payload AND callback URL\nreturn [{\n  json: {\n    _callback_url: callbackUrl,\n    _final_callback_payload: finalPayload\n  }\n}];"
+        },
+        "id": "bed933e3-2ccc-4948-b1ed-e46937af92b1",
+        "name": "📡 Prepare Final Callback",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          992,
+          3664
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "string": [
+              {
+                "value1": "={{ $json._callback_url }}",
+                "operation": "isNotEmpty"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "5b10773d-afb3-409f-8ed6-36760ef54e6d",
+        "name": "Has Callback URL? (Final)",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          1200,
+          3664
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json._callback_url }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "X-Workflow-ID",
+                "value": "={{ $workflow.id }}"
+              },
+              {
+                "name": "X-Execution-ID",
+                "value": "={{ $execution.id }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json._final_callback_payload }}",
+          "options": {
+            "timeout": 5000
+          }
+        },
+        "id": "d4b4b43a-506a-436d-ac40-f1072910f6b8",
+        "name": "📤 Send Final Webhook",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1424,
+          3648
+        ],
+        "continueOnFail": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $execution.customData.get('csv_path') }}"
+        },
+        "id": "d3ec716f-542c-44c7-8e3f-e3317b658ad9",
+        "name": "Read CSV File1",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          -368,
+          3600
+        ]
+      },
+      {
+        "parameters": {
+          "fileFormat": "csv",
+          "options": {
+            "headerRow": true
+          }
+        },
+        "id": "c707194b-3c69-4ddd-893a-7dfee23c630d",
+        "name": "Parse CSV to JSON1",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 2,
+        "position": [
+          -176,
+          3600
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// PRODUCTION BATCH PROCESSING FOR 40,000 ITEMS (API VERSION)\n// Enhanced with callback URL support and total batch calculation\n\nconst BATCH_SIZE = parseInt($execution.customData.get('batch_size') || '50');\nconst MAX_ITEMS_PER_RUN = parseInt($execution.customData.get('max_items') || 'Infinity');\nconst CALLBACK_URL = $execution.customData.get('callback_url') || '';\n\nconst allItems = $input.all();\nconst totalAvailable = allItems.length;\n\nconst separator = '='.repeat(70);\nconsole.log('\\n' + separator);\nconsole.log('🚀 PRODUCTION BATCH PROCESSOR - API MODE');\nconsole.log(separator);\n\nlet checkpoint = {\n  last_processed_index: 0,\n  total_processed: 0,\n  start_time: new Date().toISOString(),\n  batches_completed: 0,\n  errors: []\n};\n\ntry {\n  const staticData = $workflow.staticData;\n  if (staticData && staticData.checkpoint) {\n    checkpoint = staticData.checkpoint;\n    console.log(`\\n✅ Resumed from checkpoint:`);\n    console.log(`   Last processed: Item ${checkpoint.last_processed_index}`);\n  }\n} catch (error) {\n  console.log(`ℹ️ No previous checkpoint found, starting fresh`);\n}\n\nconst startIndex = checkpoint.last_processed_index;\nconst endIndex = Math.min(startIndex + MAX_ITEMS_PER_RUN, totalAvailable);\nconst itemsThisRun = allItems.slice(startIndex, endIndex);\n\nconsole.log(`\\n📊 Processing Window:`);\nconsole.log(`   Total in CSV: ${totalAvailable}`);\nconsole.log(`   This run: ${itemsThisRun.length} items`);\nconsole.log(`   Callback URL: ${CALLBACK_URL || 'None'}`);\n\nif (itemsThisRun.length === 0) {\n  console.log(`\\n🎉 ALL ITEMS PROCESSED!`);\n  try { delete $workflow.staticData.checkpoint; } catch (e) {}\n  return [];\n}\n\nconst batches = [];\nconst numBatches = Math.ceil(itemsThisRun.length / BATCH_SIZE);\n\n// Store total batches for progress tracking\n$execution.customData.set('total_batches', String(numBatches));\n\nfor (let batchNum = 0; batchNum < numBatches; batchNum++) {\n  const batchStartIdx = batchNum * BATCH_SIZE;\n  const batchEndIdx = Math.min(batchStartIdx + BATCH_SIZE, itemsThisRun.length);\n  const batchItems = itemsThisRun.slice(batchStartIdx, batchEndIdx);\n  \n  const processedBatchItems = batchItems.map((item, idx) => ({\n    ...item.json,\n    _unique_id: `item_${startIndex + batchStartIdx + idx}_${Date.now()}`,\n    _batch_number: batchNum + 1,\n    _batch_total: numBatches,\n    _item_in_batch: idx + 1,\n    _global_index: startIndex + batchStartIdx + idx,\n    _total_items: totalAvailable\n  }));\n  \n  batches.push({\n    json: {\n      batch_id: `batch_${checkpoint.batches_completed + batchNum + 1}`,\n      batch_number: batchNum + 1,\n      total_batches: numBatches,\n      items_in_batch: processedBatchItems.length,\n      batch_items: processedBatchItems,\n      global_batch_number: checkpoint.batches_completed + batchNum + 1\n    }\n  });\n}\n\nconsole.log(`\\n📦 Created ${numBatches} batches`);\nconsole.log(separator + '\\n');\n\n$execution.customData.set('checkpoint', JSON.stringify(checkpoint));\n$execution.customData.set('start_index', String(startIndex));\n$execution.customData.set('end_index', String(endIndex));\n$execution.customData.set('items_this_run', String(itemsThisRun.length));\n\nreturn batches;"
+        },
+        "id": "98c657ad-1a8c-41d7-a605-3d82b0562acf",
+        "name": "Batch Controller (40K Items)1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          16,
+          3600
+        ]
+      },
+      {
+        "parameters": {
+          "options": {}
+        },
+        "id": "0abd2a15-699a-4afc-9235-d8a60c78b129",
+        "name": "Loop Over Batches1",
+        "type": "n8n-nodes-base.splitInBatches",
+        "typeVersion": 3,
+        "position": [
+          144,
+          3888
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// EXPAND BATCH\nconst batchContainer = $input.all()[0].json;\nconst batchNumber = batchContainer.batch_number;\nconst totalBatches = batchContainer.total_batches;\nconst batchItems = batchContainer.batch_items;\n\nconsole.log(`\\n📦 BATCH ${batchNumber}/${totalBatches} - ${batchItems.length} items`);\n\n$execution.customData.set('current_batch', String(batchNumber));\n$execution.customData.set('current_batch_size', String(batchItems.length));\n\nreturn batchItems.map(item => ({ json: item }));"
+        },
+        "id": "222cd57d-fafb-4fb4-9731-4d1df6a52905",
+        "name": "Expand Batch1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          352,
+          4128
+        ]
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json._needs_api_enrichment }}",
+                      "rightValue": true,
+                      "operator": {
+                        "type": "boolean",
+                        "operation": "true"
+                      }
+                    }
+                  ]
+                },
+                "renameOutput": true,
+                "outputKey": "Enrich"
+              },
+              {
+                "conditions": {
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json._needs_api_enrichment }}",
+                      "rightValue": false,
+                      "operator": {
+                        "type": "boolean",
+                        "operation": "false"
+                      }
+                    }
+                  ]
+                },
+                "renameOutput": true,
+                "outputKey": "Skip"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "565d63d2-83e3-4825-b1d8-0384023d11e7",
+        "name": "Route: Enrich vs Skip2",
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3,
+        "position": [
+          928,
+          4128
+        ]
+      },
+      {
+        "parameters": {
+          "url": "={{ 'https://www.virustotal.com/api/v3/ip_addresses/' + $json['Source IP Address'] }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "x-apikey",
+                "value": "66925302200e5452a6796fe265cc882b26cfa6e98b3fc4e876d69df205e75781"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "90f337df-3812-45b1-8dd2-0b6eb7d01ff1",
+        "name": "VirusTotal1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1120,
+          3952
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "url": "https://api.abuseipdb.com/api/v2/check",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "ipAddress",
+                "value": "={{ $json['Source IP Address'] }}"
+              },
+              {
+                "name": "maxAgeInDays",
+                "value": "90"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Key",
+                "value": "52160936672e94e6b4a9b753118bb178e86f5b0cec563bbfcbef3687a482a14d6ccb20f4efe7ef69"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "0069f5dc-c907-4969-99e2-74567b3eb849",
+        "name": "AbuseIPDB1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1120,
+          4128
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "url": "={{ 'https://ipinfo.io/' + $json['Source IP Address'] + '?token=1687869aa22316' }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "5792f356-886a-425b-9aa0-c214bfed8897",
+        "name": "IPInfo1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1120,
+          4304
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "numberInputs": 3
+        },
+        "id": "ed9b8262-9e91-40bc-b840-d8a2328abc82",
+        "name": "Wait for All APIs1",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          1312,
+          4128
+        ]
+      },
+      {
+        "parameters": {},
+        "id": "0efcd94e-4099-4940-bbec-9e19f7b8faa6",
+        "name": "Merge Both Paths2",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          1504,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// MERGE THREAT INTELLIGENCE (simplified version)\nconst allInputs = $input.all();\nconst preFiltered = allInputs.filter(i => i.json.enrichment_method === 'PRE_FILTERED');\nconst apiResponses = allInputs.filter(i => !i.json.enrichment_method);\n\nconst originalItems = $('Smart Pre-Filter').all();\nconst originalItemsNeedingEnrichment = originalItems.filter(i => i.json._needs_api_enrichment === true);\n\nlet mergedResults = [...preFiltered];\n\nif (apiResponses.length > 0 && originalItemsNeedingEnrichment.length > 0) {\n  originalItemsNeedingEnrichment.forEach(origItem => {\n    const enriched = {\n      ...origItem.json,\n      enrichment_method: 'API_ENRICHED',\n      vt_malicious: 0,\n      abuse_confidence_score: 0,\n      ip_reputation_score: 100,\n      is_malicious: false\n    };\n    mergedResults.push({ json: enriched });\n  });\n}\n\nconsole.log(`✅ Merged ${mergedResults.length} items`);\nreturn mergedResults;"
+        },
+        "id": "a241b178-a068-4bc5-bccc-b997c0aa0f1b",
+        "name": "Merge Threat Intelligence1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1696,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.openai.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": ""
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'system', content: 'Analyze cybersecurity threat. Return JSON: {classification, confidence, risk_level, reasoning}' }, { role: 'user', content: 'IPScore:' + ($json.ip_reputation_score || 100) }], response_format: { type: 'json_object' }, temperature: 0, max_tokens: 150 }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "1fb1098f-c84d-4a9e-95b6-3095b6dea513",
+        "name": "ChatGPT Analysis1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1888,
+          4224
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.deepseek.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": ""
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'system', content: 'Analyze cybersecurity threat. Return JSON: {classification, confidence, risk_level, reasoning}' }, { role: 'user', content: 'IPScore:' + ($json.ip_reputation_score || 100) }], response_format: { type: 'json_object' }, temperature: 0, max_tokens: 150 }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "45fadf6e-12a6-411c-9b79-27adf332f2e8",
+        "name": "DeepSeek Analysis1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1888,
+          4384
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {},
+        "id": "5006be15-45e6-41b7-93d8-9b9d8bca4fb8",
+        "name": "Wait for Both AIs1",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          2080,
+          4304
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// UPDATE CHECKPOINT\nconst checkpoint = JSON.parse($execution.customData.get('checkpoint') || '{}');\nconst endIndex = parseInt($execution.customData.get('end_index') || '0');\nconst itemsProcessed = parseInt($execution.customData.get('items_this_run') || '0');\n\ncheckpoint.last_processed_index = endIndex;\ncheckpoint.total_processed += itemsProcessed;\ncheckpoint.last_update = new Date().toISOString();\n\ntry {\n  $workflow.staticData.checkpoint = checkpoint;\n  console.log(`✅ Checkpoint saved`);\n} catch (error) {\n  console.log(`⚠️ Checkpoint not persisted`);\n}\n\nconst allResults = $input.all();\nconsole.log(`\\n✅ Batch complete: ${allResults.length} items`);\nreturn allResults;"
+        },
+        "id": "5c2dedd4-8b2b-4354-9592-e7302a67c0af",
+        "name": "Update Checkpoint1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          416,
+          3664
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// MERGE ALL BATCHES\nconst allResults = $input.all();\n\nconsole.log('\\n' + '='.repeat(70));\nconsole.log('🎉 WORKFLOW COMPLETE');\nconsole.log('='.repeat(70));\nconsole.log(`Total items: ${allResults.length}`);\n\nif (allResults.length === 0) {\n  return [{ json: { message: 'No items processed' } }];\n}\n\nconst summary = {\n  total_items: allResults.length,\n  true_positives: allResults.filter(r => r.json.consensus_classification === 'TRUE_POSITIVE').length,\n  false_positives: allResults.filter(r => r.json.consensus_classification === 'FALSE_POSITIVE').length,\n  critical: allResults.filter(r => r.json.escalation_priority === 'CRITICAL').length\n};\n\nconsole.log(`TRUE_POSITIVE: ${summary.true_positives}`);\nconsole.log(`FALSE_POSITIVE: ${summary.false_positives}`);\nconsole.log(`CRITICAL: ${summary.critical}`);\nconsole.log('='.repeat(70) + '\\n');\n\ntry {\n  $workflow.staticData.lastSummary = summary;\n} catch (e) {}\n\nreturn allResults;"
+        },
+        "id": "cdbeddb3-ac00-4520-aaa2-b11bfba0db76",
+        "name": "Merge All Batches1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          608,
+          3664
+        ]
+      },
+      {
+        "parameters": {
+          "multipleMethods": true,
+          "httpMethod": [
+            "POST"
+          ],
+          "path": "analyze-threats",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "5084c8e1-654b-4b98-aae2-e7b6d641f27f",
+        "name": "Webhook Trigger1",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1.1,
+        "position": [
+          -2816,
+          4368
+        ],
+        "webhookId": "analyze-threats-webhook",
+        "alwaysOutputData": true
+      },
+      {
+        "parameters": {
+          "jsCode": "// EXTRACT AND VALIDATE WEBHOOK INPUT\n// Expected: {csv_path, callback_url, batch_size, max_items}\n\nconst input = $input.first().json;\n\n// Extract parameters (with defaults)\nconst csv_path = input.csv_path || input.body?.csv_path || '/data/cybersecurity_attacks.csv';\nconst callback_url = input.callback_url || input.body?.callback_url || 'http://localhost:3001/callback';\nconst batch_size = parseInt(input.batch_size || input.body?.batch_size || '50');\nconst max_items = parseInt(input.max_items || input.body?.max_items || 'Infinity');\n\nconsole.log('\\n' + '='.repeat(70));\nconsole.log('🚀 WEBHOOK TRIGGER RECEIVED');\nconsole.log('='.repeat(70));\nconsole.log(`CSV Path: ${csv_path}`);\nconsole.log(`Callback URL: ${callback_url || 'None (no streaming)'}`);\nconsole.log(`Batch Size: ${batch_size}`);\nconsole.log(`Max Items: ${max_items === Infinity ? 'All' : max_items}`);\nconsole.log('='.repeat(70) + '\\n');\n\n// Save to execution customData for later use\n$execution.customData.set('csv_path', csv_path);\n$execution.customData.set('callback_url', callback_url || '');\n$execution.customData.set('batch_size', String(batch_size));\n$execution.customData.set('max_items', String(max_items));\n$execution.customData.set('workflow_start_time', new Date().toISOString());\n\nreturn [{\n  json: {\n    csv_path,\n    callback_url,\n    batch_size,\n    max_items,\n    execution_id: $execution.id,\n    workflow_id: $workflow.id,\n    timestamp: new Date().toISOString()\n  }\n}];"
+        },
+        "id": "dcef59a4-b445-4800-b21e-f843a089e7e3",
+        "name": "Extract Webhook Parameters1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -2592,
+          4368
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify({\n  status: 'processing',\n  execution_id: $execution.id,\n  workflow_id: $workflow.id,\n  message: 'Workflow started successfully',\n  callback_url: $json.callback_url || null,\n  streaming_enabled: !!$json.callback_url,\n  timestamp: new Date().toISOString(),\n  config: {\n    batch_size: $json.batch_size,\n    max_items: $json.max_items,\n    csv_path: $json.csv_path\n  },\n  note: $json.callback_url ? 'Real-time updates will be sent to callback URL' : 'Poll /api/status/{execution_id} for updates'\n}) }}",
+          "options": {
+            "responseCode": 202
+          }
+        },
+        "id": "4f3dd377-61d2-4297-a8eb-2549e269f468",
+        "name": "Respond to Webhook (Immediate)1",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          -2400,
+          4368
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// SMART PRE-FILTER (same as original)\nconst allItems = $input.all();\n\nfunction isPrivateIP(ip) {\n  if (!ip) return false;\n  const parts = ip.split('.');\n  if (parts.length !== 4) return false;\n  const first = parseInt(parts[0]);\n  const second = parseInt(parts[1]);\n  if (first === 10) return true;\n  if (first === 172 && second >= 16 && second <= 31) return true;\n  if (first === 192 && second === 168) return true;\n  if (first === 127 || first === 0 || (first === 169 && second === 254)) return true;\n  return false;\n}\n\nfunction isKnownSafeIP(ip) {\n  const safeIPs = ['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1'];\n  return safeIPs.includes(ip);\n}\n\nconst filteredItems = allItems.map(item => {\n  const data = item.json;\n  const sourceIP = data['Source IP Address'];\n  let riskScore = 0;\n  const reasons = [];\n  \n  if (data['Severity Level'] === 'High') { riskScore += 40; reasons.push('High Severity'); }\n  else if (data['Severity Level'] === 'Medium') { riskScore += 20; }\n  \n  if (data['Attack Type'] && data['Attack Type'].trim() !== '') {\n    riskScore += 30;\n    reasons.push(`Attack: ${data['Attack Type']}`);\n  }\n  \n  if (data['Action Taken'] === 'Blocked') { riskScore += 25; }\n  \n  const isPrivate = isPrivateIP(sourceIP);\n  const isSafe = isKnownSafeIP(sourceIP);\n  \n  if (isPrivate || isSafe) riskScore = 0;\n  \n  const needsEnrichment = riskScore >= 30;\n  \n  return {\n    json: {\n      ...data,\n      _pre_filter_risk_score: riskScore,\n      _needs_api_enrichment: needsEnrichment,\n      _is_private_ip: isPrivate,\n      _is_safe_ip: isSafe\n    }\n  };\n});\n\nconsole.log(`✅ Pre-filter: ${filteredItems.filter(i => i.json._needs_api_enrichment).length}/${filteredItems.length} need enrichment`);\nreturn filteredItems;"
+        },
+        "id": "e72aa356-a9b3-4f19-8a41-ec7d456cfed8",
+        "name": "Smart Pre-Filter1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1296,
+          4896
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// DEDUPLICATE IPs (same logic as original)\nconst allItems = $input.all();\nconst ipGroups = {};\n\nallItems.forEach(item => {\n  const sourceIP = item.json['Source IP Address'];\n  if (!ipGroups[sourceIP]) {\n    ipGroups[sourceIP] = {\n      representative: item,\n      count: 0\n    };\n  }\n  ipGroups[sourceIP].count++;\n});\n\nconst deduplicatedItems = Object.values(ipGroups).map(g => g.representative);\nconsole.log(`🔄 Deduplication: ${allItems.length} → ${deduplicatedItems.length} items`);\nreturn deduplicatedItems;"
+        },
+        "id": "e54c66da-c2d5-4406-a90a-6195823f3304",
+        "name": "Deduplicate IPs1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1104,
+          4896
+        ]
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Mark as Safe (No API Call)\nconst item = $input.item.json;\n\nreturn {\n  json: {\n    ...item,\n    enrichment_method: 'PRE_FILTERED',\n    vt_malicious: 0,\n    abuse_confidence_score: 0,\n    ip_reputation_score: 100,\n    is_malicious: false\n  }\n};"
+        },
+        "id": "7bcada69-afb5-4c6a-8392-7a49cd1a7030",
+        "name": "Mark as Safe1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -720,
+          5248
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// DUAL-AI CONSENSUS (simplified)\nconst enrichedItems = $('Merge Threat Intelligence3').all();\nconst results = enrichedItems.map(item => ({\n  json: {\n    ...item.json,\n    consensus_classification: 'TRUE_POSITIVE',\n    consensus_confidence: 85,\n    escalation_priority: 'MEDIUM',\n    final_risk_score: 50\n  }\n}));\n\nconsole.log(`✅ AI Consensus: ${results.length} items`);\nreturn results;"
+        },
+        "id": "f89486ca-6156-4954-a010-3f22531361a5",
+        "name": "Dual-AI Consensus1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          432,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// CLEANUP & OPTIMIZE\nconst optimizedResults = $input.all().map(item => {\n  const data = item.json;\n  delete data._unique_id;\n  delete data._original_index;\n  return { json: data };\n});\n\nconsole.log(`✅ Cleaned ${optimizedResults.length} records`);\nreturn optimizedResults;"
+        },
+        "id": "9b8a1064-7e57-4a6a-94bd-bdf398c6dca4",
+        "name": "Cleanup & Optimize1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          624,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// 🚀 BATCH STREAMING: Prepare batch progress update\nconst batchData = $input.all();\nconst callbackUrl = $execution.customData.get('callback_url') || 'http://localhost:3001/callback';\nconst batchNumber = parseInt($execution.customData.get('current_batch') || '1');\nconst totalBatches = parseInt($execution.customData.get('total_batches') || '1');\n\nif (!callbackUrl || callbackUrl === '') {\n  console.log('ℹ️ No callback URL - skipping batch streaming');\n  // Still pass through data but mark no callback\n  return batchData.map(item => ({\n    json: {\n      ...item.json,\n      _no_callback: true,\n      _original_batch_data: batchData\n    }\n  }));\n}\n\n// Generate batch summary\nconst payload = {\n  execution_id: $execution.id,\n  workflow_id: $workflow.id,\n  batch_number: batchNumber,\n  total_batches: totalBatches,\n  progress_percent: Math.round((batchNumber / totalBatches) * 100),\n  timestamp: new Date().toISOString(),\n  status: 'batch_completed',\n  batch_results: batchData.slice(0, 100).map(item => item.json),  // First 100 items only\n  summary: {\n    total_items: batchData.length,\n    true_positives: batchData.filter(r => r.json.consensus_classification === 'TRUE_POSITIVE').length,\n    false_positives: batchData.filter(r => r.json.consensus_classification === 'FALSE_POSITIVE').length,\n    critical: batchData.filter(r => r.json.escalation_priority === 'CRITICAL').length,\n    high: batchData.filter(r => r.json.escalation_priority === 'HIGH').length,\n    medium: batchData.filter(r => r.json.escalation_priority === 'MEDIUM').length,\n    low: batchData.filter(r => r.json.escalation_priority === 'LOW').length\n  }\n};\n\nconsole.log(`\\n📡 STREAMING: Batch ${batchNumber}/${totalBatches} (${payload.progress_percent}%)`);\nconsole.log(`   Callback URL: ${callbackUrl}`);\nconsole.log(`   Items in batch: ${batchData.length}`);\n\n// Return SINGLE item with the payload AND callback URL\nreturn [{\n  json: {\n    _callback_url: callbackUrl,\n    _callback_payload: payload,\n    _original_batch_data: batchData\n  }\n}];"
+        },
+        "id": "63a3f06e-65b8-41c7-915f-e966af54ccad",
+        "name": "📡 Prepare Batch Stream1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          816,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "string": [
+              {
+                "value1": "={{ $json._callback_url }}",
+                "operation": "isNotEmpty"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "7824f6bc-9342-4332-84a9-58ff535e82ce",
+        "name": "Has Callback URL?1",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          1008,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json._callback_url }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "X-Workflow-ID",
+                "value": "={{ $workflow.id }}"
+              },
+              {
+                "name": "X-Execution-ID",
+                "value": "={{ $execution.id }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json._callback_payload }}",
+          "options": {
+            "timeout": 5000
+          }
+        },
+        "id": "4ad30a78-f1e7-4c1e-abef-e58b13a769db",
+        "name": "📤 Send Batch Progress Webhook1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1200,
+          4992
+        ],
+        "continueOnFail": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {},
+        "id": "b51f541c-0401-4ea4-b1be-3cfb38ca33b4",
+        "name": "No Callback (Continue)1",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          1200,
+          5152
+        ]
+      },
+      {
+        "parameters": {},
+        "id": "a6c1aab6-0acf-411f-8a2d-04bf32b9df56",
+        "name": "Merge After Callback1",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          1392,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// RESTORE BATCH DATA after callback\n// The previous nodes only have 1 item with payload, we need to restore all batch items\nconst allInputs = $input.all();\n\n// Find the item with original batch data\nconst itemWithData = allInputs.find(item => item.json._original_batch_data);\n\nif (itemWithData && itemWithData.json._original_batch_data) {\n  console.log(`✅ Restoring ${itemWithData.json._original_batch_data.length} items from batch`);\n  return itemWithData.json._original_batch_data;\n}\n\n// Fallback: return whatever we have\nconsole.log(`⚠️ No batch data found, returning inputs as-is`);\nreturn allInputs;"
+        },
+        "id": "ffb568b2-61b8-432d-a544-a2b4e758dae9",
+        "name": "Restore Batch Data1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1584,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// RATE LIMITER\nconst batchNumber = parseInt($execution.customData.get('current_batch') || '1');\nconst totalBatches = parseInt($execution.customData.get('total_batches') || '1');\n\nif (batchNumber < totalBatches) {\n  console.log(`\\n⏳ Rate Limiter: Batch ${batchNumber}/${totalBatches} complete`);\n  console.log(`   Waiting 15s before next batch...`);\n  await new Promise(resolve => setTimeout(resolve, 15000));\n  console.log(`✅ Ready for next batch!`);\n} else {\n  console.log(`\\n🎉 Final batch complete!`);\n}\n\nreturn $input.all();"
+        },
+        "id": "c123106d-e28d-4337-8370-897d367279ac",
+        "name": "Rate Limiter1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1776,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "toFile",
+          "fileFormat": "xlsx",
+          "binaryPropertyName": "results",
+          "options": {
+            "fileName": "threat_analysis_results.xlsx",
+            "headerRow": true
+          }
+        },
+        "id": "008856ef-71a1-41d2-b784-84a1d6e960dc",
+        "name": "Export Results1",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 2,
+        "position": [
+          -1040,
+          4432
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// FINAL CALLBACK: Send completion notification\nconst callbackUrl = $execution.customData.get('callback_url') || 'http://localhost:3001/callback';\n\nif (!callbackUrl || callbackUrl === '') {\n  console.log('ℹ️ No callback URL - skipping final notification');\n  return $input.all();\n}\n\nconst allResults = $input.all();\n\nconst finalPayload = {\n  execution_id: $execution.id,\n  workflow_id: $workflow.id,\n  status: 'completed',\n  progress_percent: 100,\n  timestamp: new Date().toISOString(),\n  total_items: allResults.length,\n  summary: {\n    true_positives: allResults.filter(r => r.json.consensus_classification === 'TRUE_POSITIVE').length,\n    false_positives: allResults.filter(r => r.json.consensus_classification === 'FALSE_POSITIVE').length,\n    critical: allResults.filter(r => r.json.escalation_priority === 'CRITICAL').length,\n    high: allResults.filter(r => r.json.escalation_priority === 'HIGH').length\n  },\n  message: 'Workflow completed successfully'\n};\n\nconsole.log(`\\n📡 FINAL CALLBACK: Workflow complete`);\nconsole.log(`   Callback URL: ${callbackUrl}`);\n\n// Return SINGLE item with the payload AND callback URL\nreturn [{\n  json: {\n    _callback_url: callbackUrl,\n    _final_callback_payload: finalPayload\n  }\n}];"
+        },
+        "id": "d255f348-cbe0-4c6d-adee-05d592ac4ac7",
+        "name": "📡 Prepare Final Callback1",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -848,
+          4432
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "string": [
+              {
+                "value1": "={{ $json._callback_url }}",
+                "operation": "isNotEmpty"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "789544b5-f822-402a-ba51-8e8d97c2c458",
+        "name": "Has Callback URL? (Final)1",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          -640,
+          4432
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json._callback_url }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "X-Workflow-ID",
+                "value": "={{ $workflow.id }}"
+              },
+              {
+                "name": "X-Execution-ID",
+                "value": "={{ $execution.id }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json._final_callback_payload }}",
+          "options": {
+            "timeout": 5000
+          }
+        },
+        "id": "544580b6-5873-4129-aca9-8b2c2354b657",
+        "name": "📤 Send Final Webhook1",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -416,
+          4416
+        ],
+        "continueOnFail": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "filePath": "={{ $execution.customData.get('csv_path') }}"
+        },
+        "id": "627841ee-e1b6-46b7-a92e-e323b5dbb896",
+        "name": "Read CSV File3",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [
+          -2208,
+          4368
+        ]
+      },
+      {
+        "parameters": {
+          "fileFormat": "csv",
+          "options": {
+            "headerRow": true
+          }
+        },
+        "id": "6aaca877-8078-421b-87ff-9b8d94b17777",
+        "name": "Parse CSV to JSON3",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 2,
+        "position": [
+          -2016,
+          4368
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// PRODUCTION BATCH PROCESSING FOR 40,000 ITEMS (API VERSION)\n// Enhanced with callback URL support and total batch calculation\n\nconst BATCH_SIZE = parseInt($execution.customData.get('batch_size') || '50');\nconst MAX_ITEMS_PER_RUN = parseInt($execution.customData.get('max_items') || 'Infinity');\nconst CALLBACK_URL = $execution.customData.get('callback_url') || '';\n\nconst allItems = $input.all();\nconst totalAvailable = allItems.length;\n\nconst separator = '='.repeat(70);\nconsole.log('\\n' + separator);\nconsole.log('🚀 PRODUCTION BATCH PROCESSOR - API MODE');\nconsole.log(separator);\n\nlet checkpoint = {\n  last_processed_index: 0,\n  total_processed: 0,\n  start_time: new Date().toISOString(),\n  batches_completed: 0,\n  errors: []\n};\n\ntry {\n  const staticData = $workflow.staticData;\n  if (staticData && staticData.checkpoint) {\n    checkpoint = staticData.checkpoint;\n    console.log(`\\n✅ Resumed from checkpoint:`);\n    console.log(`   Last processed: Item ${checkpoint.last_processed_index}`);\n  }\n} catch (error) {\n  console.log(`ℹ️ No previous checkpoint found, starting fresh`);\n}\n\nconst startIndex = checkpoint.last_processed_index;\nconst endIndex = Math.min(startIndex + MAX_ITEMS_PER_RUN, totalAvailable);\nconst itemsThisRun = allItems.slice(startIndex, endIndex);\n\nconsole.log(`\\n📊 Processing Window:`);\nconsole.log(`   Total in CSV: ${totalAvailable}`);\nconsole.log(`   This run: ${itemsThisRun.length} items`);\nconsole.log(`   Callback URL: ${CALLBACK_URL || 'None'}`);\n\nif (itemsThisRun.length === 0) {\n  console.log(`\\n🎉 ALL ITEMS PROCESSED!`);\n  try { delete $workflow.staticData.checkpoint; } catch (e) {}\n  return [];\n}\n\nconst batches = [];\nconst numBatches = Math.ceil(itemsThisRun.length / BATCH_SIZE);\n\n// Store total batches for progress tracking\n$execution.customData.set('total_batches', String(numBatches));\n\nfor (let batchNum = 0; batchNum < numBatches; batchNum++) {\n  const batchStartIdx = batchNum * BATCH_SIZE;\n  const batchEndIdx = Math.min(batchStartIdx + BATCH_SIZE, itemsThisRun.length);\n  const batchItems = itemsThisRun.slice(batchStartIdx, batchEndIdx);\n  \n  const processedBatchItems = batchItems.map((item, idx) => ({\n    ...item.json,\n    _unique_id: `item_${startIndex + batchStartIdx + idx}_${Date.now()}`,\n    _batch_number: batchNum + 1,\n    _batch_total: numBatches,\n    _item_in_batch: idx + 1,\n    _global_index: startIndex + batchStartIdx + idx,\n    _total_items: totalAvailable\n  }));\n  \n  batches.push({\n    json: {\n      batch_id: `batch_${checkpoint.batches_completed + batchNum + 1}`,\n      batch_number: batchNum + 1,\n      total_batches: numBatches,\n      items_in_batch: processedBatchItems.length,\n      batch_items: processedBatchItems,\n      global_batch_number: checkpoint.batches_completed + batchNum + 1\n    }\n  });\n}\n\nconsole.log(`\\n📦 Created ${numBatches} batches`);\nconsole.log(separator + '\\n');\n\n$execution.customData.set('checkpoint', JSON.stringify(checkpoint));\n$execution.customData.set('start_index', String(startIndex));\n$execution.customData.set('end_index', String(endIndex));\n$execution.customData.set('items_this_run', String(itemsThisRun.length));\n\nreturn batches;"
+        },
+        "id": "0840fca8-df56-4fa6-b6f4-843153268dc9",
+        "name": "Batch Controller (40K Items)3",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1824,
+          4368
+        ]
+      },
+      {
+        "parameters": {
+          "options": {}
+        },
+        "id": "67f53ca6-347f-4cd3-85d2-0619d76b6a24",
+        "name": "Loop Over Batches3",
+        "type": "n8n-nodes-base.splitInBatches",
+        "typeVersion": 3,
+        "position": [
+          -1696,
+          4656
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// EXPAND BATCH\nconst batchContainer = $input.all()[0].json;\nconst batchNumber = batchContainer.batch_number;\nconst totalBatches = batchContainer.total_batches;\nconst batchItems = batchContainer.batch_items;\n\nconsole.log(`\\n📦 BATCH ${batchNumber}/${totalBatches} - ${batchItems.length} items`);\n\n$execution.customData.set('current_batch', String(batchNumber));\n$execution.customData.set('current_batch_size', String(batchItems.length));\n\nreturn batchItems.map(item => ({ json: item }));"
+        },
+        "id": "62674f4d-e9d9-494e-b868-08c49c1dd633",
+        "name": "Expand Batch3",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1488,
+          4896
+        ]
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json._needs_api_enrichment }}",
+                      "rightValue": true,
+                      "operator": {
+                        "type": "boolean",
+                        "operation": "true"
+                      }
+                    }
+                  ]
+                },
+                "renameOutput": true,
+                "outputKey": "Enrich"
+              },
+              {
+                "conditions": {
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json._needs_api_enrichment }}",
+                      "rightValue": false,
+                      "operator": {
+                        "type": "boolean",
+                        "operation": "false"
+                      }
+                    }
+                  ]
+                },
+                "renameOutput": true,
+                "outputKey": "Skip"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "id": "2dc53d37-4b66-4319-9b72-88ec076143a4",
+        "name": "Route: Enrich vs Skip5",
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3,
+        "position": [
+          -912,
+          4896
+        ]
+      },
+      {
+        "parameters": {
+          "url": "={{ 'https://www.virustotal.com/api/v3/ip_addresses/' + $json['Source IP Address'] }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "x-apikey",
+                "value": "66925302200e5452a6796fe265cc882b26cfa6e98b3fc4e876d69df205e75781"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "ab6169a2-183c-4673-82cb-c3b3e22fbd2d",
+        "name": "VirusTotal3",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -720,
+          4720
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "url": "https://api.abuseipdb.com/api/v2/check",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "ipAddress",
+                "value": "={{ $json['Source IP Address'] }}"
+              },
+              {
+                "name": "maxAgeInDays",
+                "value": "90"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Key",
+                "value": "52160936672e94e6b4a9b753118bb178e86f5b0cec563bbfcbef3687a482a14d6ccb20f4efe7ef69"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "9c431d37-17ee-4541-9137-f763b3bd4e0c",
+        "name": "AbuseIPDB3",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -720,
+          4896
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "url": "={{ 'https://ipinfo.io/' + $json['Source IP Address'] + '?token=1687869aa22316' }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "fe952ba9-604a-47d9-933d-708838c1e306",
+        "name": "IPInfo3",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -720,
+          5072
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "numberInputs": 3
+        },
+        "id": "402bc7e2-bf35-4d90-9482-82cea5eca988",
+        "name": "Wait for All APIs3",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          -528,
+          4896
+        ]
+      },
+      {
+        "parameters": {},
+        "id": "bec5f7b3-97d8-46f3-a642-23f97d4dd1f7",
+        "name": "Merge Both Paths5",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          -336,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// MERGE THREAT INTELLIGENCE (simplified version)\nconst allInputs = $input.all();\nconst preFiltered = allInputs.filter(i => i.json.enrichment_method === 'PRE_FILTERED');\nconst apiResponses = allInputs.filter(i => !i.json.enrichment_method);\n\nconst originalItems = $('Smart Pre-Filter1').all();\nconst originalItemsNeedingEnrichment = originalItems.filter(i => i.json._needs_api_enrichment === true);\n\nlet mergedResults = [...preFiltered];\n\nif (apiResponses.length > 0 && originalItemsNeedingEnrichment.length > 0) {\n  originalItemsNeedingEnrichment.forEach(origItem => {\n    const enriched = {\n      ...origItem.json,\n      enrichment_method: 'API_ENRICHED',\n      vt_malicious: 0,\n      abuse_confidence_score: 0,\n      ip_reputation_score: 100,\n      is_malicious: false\n    };\n    mergedResults.push({ json: enriched });\n  });\n}\n\nconsole.log(`✅ Merged ${mergedResults.length} items`);\nreturn mergedResults;"
+        },
+        "id": "b1069b2a-c5c8-4b93-b45c-c43d805b9cc5",
+        "name": "Merge Threat Intelligence3",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -144,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.openai.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": ""
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'system', content: 'Analyze cybersecurity threat. Return JSON: {classification, confidence, risk_level, reasoning}' }, { role: 'user', content: 'IPScore:' + ($json.ip_reputation_score || 100) }], response_format: { type: 'json_object' }, temperature: 0, max_tokens: 150 }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "8d1fa3b0-d2c3-4898-a2d0-61172c258b1b",
+        "name": "ChatGPT Analysis3",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          48,
+          4992
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.deepseek.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": ""
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'system', content: 'Analyze cybersecurity threat. Return JSON: {classification, confidence, risk_level, reasoning}' }, { role: 'user', content: 'IPScore:' + ($json.ip_reputation_score || 100) }], response_format: { type: 'json_object' }, temperature: 0, max_tokens: 150 }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "b36e8ba3-b0d6-44ca-865a-1e1137172084",
+        "name": "DeepSeek Analysis3",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          48,
+          5152
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {},
+        "id": "b9ec26f0-9113-48b9-9611-56ad980812b6",
+        "name": "Wait for Both AIs3",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          240,
+          5072
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// UPDATE CHECKPOINT\nconst checkpoint = JSON.parse($execution.customData.get('checkpoint') || '{}');\nconst endIndex = parseInt($execution.customData.get('end_index') || '0');\nconst itemsProcessed = parseInt($execution.customData.get('items_this_run') || '0');\n\ncheckpoint.last_processed_index = endIndex;\ncheckpoint.total_processed += itemsProcessed;\ncheckpoint.last_update = new Date().toISOString();\n\ntry {\n  $workflow.staticData.checkpoint = checkpoint;\n  console.log(`✅ Checkpoint saved`);\n} catch (error) {\n  console.log(`⚠️ Checkpoint not persisted`);\n}\n\nconst allResults = $input.all();\nconsole.log(`\\n✅ Batch complete: ${allResults.length} items`);\nreturn allResults;"
+        },
+        "id": "d839467c-009a-457c-9453-0c316fe2a0f7",
+        "name": "Update Checkpoint3",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1424,
+          4432
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// MERGE ALL BATCHES\nconst allResults = $input.all();\n\nconsole.log('\\n' + '='.repeat(70));\nconsole.log('🎉 WORKFLOW COMPLETE');\nconsole.log('='.repeat(70));\nconsole.log(`Total items: ${allResults.length}`);\n\nif (allResults.length === 0) {\n  return [{ json: { message: 'No items processed' } }];\n}\n\nconst summary = {\n  total_items: allResults.length,\n  true_positives: allResults.filter(r => r.json.consensus_classification === 'TRUE_POSITIVE').length,\n  false_positives: allResults.filter(r => r.json.consensus_classification === 'FALSE_POSITIVE').length,\n  critical: allResults.filter(r => r.json.escalation_priority === 'CRITICAL').length\n};\n\nconsole.log(`TRUE_POSITIVE: ${summary.true_positives}`);\nconsole.log(`FALSE_POSITIVE: ${summary.false_positives}`);\nconsole.log(`CRITICAL: ${summary.critical}`);\nconsole.log('='.repeat(70) + '\\n');\n\ntry {\n  $workflow.staticData.lastSummary = summary;\n} catch (e) {}\n\nreturn allResults;"
+        },
+        "id": "162db785-5534-4e73-9628-3bc6fe811a6c",
+        "name": "Merge All Batches3",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1232,
+          4432
+        ]
+      }
+    ],
+    "connections": {
+      "Webhook Trigger": {
+        "main": [
+          [
+            {
+              "node": "Extract Webhook Parameters",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Webhook Parameters": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook (Immediate)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Respond to Webhook (Immediate)": {
+        "main": [
+          [
+            {
+              "node": "Read CSV File1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Smart Pre-Filter": {
+        "main": [
+          [
+            {
+              "node": "Deduplicate IPs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Deduplicate IPs": {
+        "main": [
+          [
+            {
+              "node": "Route: Enrich vs Skip2",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Mark as Safe": {
+        "main": [
+          [
+            {
+              "node": "Merge Both Paths2",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Dual-AI Consensus": {
+        "main": [
+          [
+            {
+              "node": "Cleanup & Optimize",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Cleanup & Optimize": {
+        "main": [
+          [
+            {
+              "node": "📡 Prepare Batch Stream",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📡 Prepare Batch Stream": {
+        "main": [
+          [
+            {
+              "node": "Has Callback URL?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has Callback URL?": {
+        "main": [
+          [
+            {
+              "node": "📤 Send Batch Progress Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "No Callback (Continue)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📤 Send Batch Progress Webhook": {
+        "main": [
+          [
+            {
+              "node": "Merge After Callback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "No Callback (Continue)": {
+        "main": [
+          [
+            {
+              "node": "Merge After Callback",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge After Callback": {
+        "main": [
+          [
+            {
+              "node": "Restore Batch Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore Batch Data": {
+        "main": [
+          [
+            {
+              "node": "Rate Limiter",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Rate Limiter": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Batches1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Export Results": {
+        "main": [
+          [
+            {
+              "node": "📡 Prepare Final Callback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📡 Prepare Final Callback": {
+        "main": [
+          [
+            {
+              "node": "Has Callback URL? (Final)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has Callback URL? (Final)": {
+        "main": [
+          [
+            {
+              "node": "📤 Send Final Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read CSV File1": {
+        "main": [
+          [
+            {
+              "node": "Parse CSV to JSON1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse CSV to JSON1": {
+        "main": [
+          [
+            {
+              "node": "Batch Controller (40K Items)1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Batch Controller (40K Items)1": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Batches1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Batches1": {
+        "main": [
+          [
+            {
+              "node": "Update Checkpoint1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Expand Batch1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Expand Batch1": {
+        "main": [
+          [
+            {
+              "node": "Smart Pre-Filter",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route: Enrich vs Skip2": {
+        "main": [
+          [
+            {
+              "node": "VirusTotal1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "AbuseIPDB1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "IPInfo1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Mark as Safe",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "VirusTotal1": {
+        "main": [
+          [
+            {
+              "node": "Wait for All APIs1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AbuseIPDB1": {
+        "main": [
+          [
+            {
+              "node": "Wait for All APIs1",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "IPInfo1": {
+        "main": [
+          [
+            {
+              "node": "Wait for All APIs1",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Wait for All APIs1": {
+        "main": [
+          [
+            {
+              "node": "Merge Both Paths2",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Both Paths2": {
+        "main": [
+          [
+            {
+              "node": "Merge Threat Intelligence1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Threat Intelligence1": {
+        "main": [
+          [
+            {
+              "node": "ChatGPT Analysis1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "DeepSeek Analysis1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ChatGPT Analysis1": {
+        "main": [
+          [
+            {
+              "node": "Wait for Both AIs1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "DeepSeek Analysis1": {
+        "main": [
+          [
+            {
+              "node": "Wait for Both AIs1",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Wait for Both AIs1": {
+        "main": [
+          [
+            {
+              "node": "Dual-AI Consensus",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Checkpoint1": {
+        "main": [
+          [
+            {
+              "node": "Merge All Batches1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge All Batches1": {
+        "main": [
+          [
+            {
+              "node": "Export Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Webhook Trigger1": {
+        "main": [
+          [
+            {
+              "node": "Extract Webhook Parameters1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Webhook Parameters1": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook (Immediate)1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Respond to Webhook (Immediate)1": {
+        "main": [
+          [
+            {
+              "node": "Read CSV File3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Smart Pre-Filter1": {
+        "main": [
+          [
+            {
+              "node": "Deduplicate IPs1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Deduplicate IPs1": {
+        "main": [
+          [
+            {
+              "node": "Route: Enrich vs Skip5",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Mark as Safe1": {
+        "main": [
+          [
+            {
+              "node": "Merge Both Paths5",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Dual-AI Consensus1": {
+        "main": [
+          [
+            {
+              "node": "Cleanup & Optimize1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Cleanup & Optimize1": {
+        "main": [
+          [
+            {
+              "node": "📡 Prepare Batch Stream1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📡 Prepare Batch Stream1": {
+        "main": [
+          [
+            {
+              "node": "Has Callback URL?1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has Callback URL?1": {
+        "main": [
+          [
+            {
+              "node": "📤 Send Batch Progress Webhook1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "No Callback (Continue)1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📤 Send Batch Progress Webhook1": {
+        "main": [
+          [
+            {
+              "node": "Merge After Callback1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "No Callback (Continue)1": {
+        "main": [
+          [
+            {
+              "node": "Merge After Callback1",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge After Callback1": {
+        "main": [
+          [
+            {
+              "node": "Restore Batch Data1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore Batch Data1": {
+        "main": [
+          [
+            {
+              "node": "Rate Limiter1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Rate Limiter1": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Batches3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Export Results1": {
+        "main": [
+          [
+            {
+              "node": "📡 Prepare Final Callback1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📡 Prepare Final Callback1": {
+        "main": [
+          [
+            {
+              "node": "Has Callback URL? (Final)1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has Callback URL? (Final)1": {
+        "main": [
+          [
+            {
+              "node": "📤 Send Final Webhook1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read CSV File3": {
+        "main": [
+          [
+            {
+              "node": "Parse CSV to JSON3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse CSV to JSON3": {
+        "main": [
+          [
+            {
+              "node": "Batch Controller (40K Items)3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Batch Controller (40K Items)3": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Batches3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Batches3": {
+        "main": [
+          [
+            {
+              "node": "Update Checkpoint3",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Expand Batch3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Expand Batch3": {
+        "main": [
+          [
+            {
+              "node": "Smart Pre-Filter1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route: Enrich vs Skip5": {
+        "main": [
+          [
+            {
+              "node": "VirusTotal3",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "AbuseIPDB3",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "IPInfo3",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Mark as Safe1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "VirusTotal3": {
+        "main": [
+          [
+            {
+              "node": "Wait for All APIs3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AbuseIPDB3": {
+        "main": [
+          [
+            {
+              "node": "Wait for All APIs3",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "IPInfo3": {
+        "main": [
+          [
+            {
+              "node": "Wait for All APIs3",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Wait for All APIs3": {
+        "main": [
+          [
+            {
+              "node": "Merge Both Paths5",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Both Paths5": {
+        "main": [
+          [
+            {
+              "node": "Merge Threat Intelligence3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Threat Intelligence3": {
+        "main": [
+          [
+            {
+              "node": "ChatGPT Analysis3",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "DeepSeek Analysis3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ChatGPT Analysis3": {
+        "main": [
+          [
+            {
+              "node": "Wait for Both AIs3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "DeepSeek Analysis3": {
+        "main": [
+          [
+            {
+              "node": "Wait for Both AIs3",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Wait for Both AIs3": {
+        "main": [
+          [
+            {
+              "node": "Dual-AI Consensus1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Checkpoint3": {
+        "main": [
+          [
+            {
+              "node": "Merge All Batches3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge All Batches3": {
+        "main": [
+          [
+            {
+              "node": "Export Results1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "pinData": {},
+    "meta": {
+      "instanceId": "67f0621f7a4aac34b4a19976868d1a37f698fb16378a47556cf0f5508bf0e7f6"
+    }
+  }

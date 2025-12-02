@@ -1,0 +1,36 @@
+/* Premium minimal styles */
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Remove all scrollbar styling for a cleaner look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Selection colors */
+::selection {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.2);
+  outline-offset: 2px;
+}
